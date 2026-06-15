@@ -1,143 +1,160 @@
 #!/usr/bin/env python3
 
+import os
+import re
+import sys
 import subprocess
 import urllib.request
-import urllib.error
-import json
-import os
-import sys
+from pathlib import Path
 
-RED = '\033[0;31m'
-GREEN = '\033[0;32m'
-YELLOW = '\033[1;33m'
-CYAN = '\033[0;36m'
-NC = '\033[0m'
+RED = "\033[1;31m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+CYAN = "\033[1;36m"
+BOLD = "\033[1m"
+NC = "\033[0m"
 
-SONATYPE_API_URL = "https://api.sonatype.com/v1/threat-intel/campaigns/atomic-arch/packages"
-SAFEDEP_API_URL = "https://api.safedep.io/ti/campaigns/atomic-arch/iocs"
+INTEL_FEED_URL = "https://md.archlinux.org/s/SxbqukK6IA/download"
 
-SONATYPE_FALLBACK_PKGS = ["example-hijacked-pkg1", "omarchy-update-aur-pkgs"]
-SAFEDEP_FALLBACK_IOCS = ["atomic-lockfile", "js-digest", "scales.bpf.c"]
+HEURISTIC_SIGS = [
+    r"atomic-lockfile",
+    r"js-digest",
+    r"lockfile-js",
+    r"nextfile-js",
+    r"npm\s+(install|i)\s+",
+    r"bun\s+add\s+",
+    r"yarn\s+add\s+"
+]
 
-def fetch_sonatype_packages():
-    print(f"{CYAN}[*] Fetching known hijacked AUR packages from Sonatype Threat Intelligence...{NC}")
+def banner():
+    print(f"{CYAN}{BOLD}===================================================={NC}")
+    print(f"{CYAN}{BOLD}        AUR THREAT MITIGATOR: ATOMIC ARCH           {NC}")
+    print(f"{CYAN}        Real-time Live Feed & Behavioral Auditor     {NC}")
+    print(f"{CYAN}{BOLD}===================================================={NC}\n")
+
+def fetch_live_compromised_list():
+    print(f"{BOLD}[*] Connecting to Arch Linux Live Incident Server...{NC}")
+    req = urllib.request.Request(
+        INTEL_FEED_URL, 
+        headers={'User-Agent': 'Mozilla/5.0 (X11; Arch Linux; Linux x86_64)'}
+    )
     try:
-        req = urllib.request.Request(SONATYPE_API_URL, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception:
-        print(f"{YELLOW}[!] Sonatype API unreachable. Using fallback package list.{NC}\n")
-        return SONATYPE_FALLBACK_PKGS
-
-def fetch_safedep_iocs():
-    print(f"{CYAN}[*] Fetching latest eBPF and npm/bun IOCs from SafeDep...{NC}")
-    try:
-        req = urllib.request.Request(SAFEDEP_API_URL, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except Exception:
-        print(f"{YELLOW}[!] SafeDep API unreachable. Using fallback IOC list.{NC}\n")
-        return SAFEDEP_FALLBACK_IOCS
+            raw_data = response.read().decode('utf-8')
+            
+        compromised = set()
+        for line in raw_data.splitlines():
+            line = line.strip()
+            match = re.search(r"-\s*([a-zA-Z0-9\-_+\.]+)", line)
+            if match and not line.startswith("#"):
+                compromised.add(match.group(1).lower())
+                
+        if len(compromised) > 0:
+            print(f"    {GREEN}[✓] Successfully synced live feed. Tracking {len(compromised)} blacklisted packages.{NC}")
+            return compromised
+    except Exception as e:
+        print(f"    {YELLOW}[!] Feed Sync Failed ({e}). Falling back to advanced heuristics.{NC}")
+        
+    return set()
 
 def get_local_aur_packages():
-    print(f"{CYAN}[*] Enumerating local AUR packages...{NC}")
     try:
-        result = subprocess.run(['pacman', '-Qm'], capture_output=True, text=True, check=True)
-        return [line.split()[0] for line in result.stdout.strip().split('\n') if line]
-    except subprocess.CalledProcessError:
-        print(f"{RED}[!] Failed to query pacman. Are you on an Arch-based system?{NC}")
+        res = subprocess.run(["pacman", "-Qmq"], capture_output=True, text=True, check=True)
+        packages = [pkg.strip().lower() for pkg in res.stdout.splitlines() if pkg.strip()]
+        print(f"    - Found {len(packages)} local AUR packages installed.")
+        return packages
+    except Exception as e:
+        print(f"    {RED}[-] Failed to query local pacman database: {e}{NC}")
         sys.exit(1)
 
-def scan_iocs(safedep_iocs):
-    paranoia_level = 0
-    print(f"{CYAN}[*] Sweeping system for 'Atomic Arch' execution artifacts from SafeDep...{NC}")
-    home = os.path.expanduser("~")
+def scan_pacman_local_db():
+    print(f"\n{BOLD}[*] Auditing local ALPM metadata for malicious post-install hooks...{NC}")
+    pacman_db = Path("/var/lib/pacman/local")
+    if not pacman_db.exists():
+        print(f"    {YELLOW}[!] Pacman local DB structure missing or inaccessible. Skipping heuristics.{NC}")
+        return 0
 
-    for ioc in safedep_iocs:
-        if ioc in ["atomic-lockfile", "js-digest"]:
-            for cache_dir in [".npm", ".bun/install/cache"]:
-                target_path = os.path.join(home, cache_dir)
-                if os.path.exists(target_path):
-                    if subprocess.run(['grep', '-qr', ioc, target_path], capture_output=True).returncode == 0:
-                        print(f"  {RED}[!] SafeDep IOC FOUND:{NC} '{ioc}' traces detected in {cache_dir}.")
-                        paranoia_level += 1
-        elif "bpf" in ioc or "scales" in ioc:
+    compiled_sigs = [re.compile(sig, re.IGNORECASE) for sig in HEURISTIC_SIGS]
+    flagged_hooks = 0
+
+    for path in pacman_db.glob("*/desc"):
+        try:
+            content = path.read_text(errors="ignore")
+            for sig in compiled_sigs:
+                if sig.search(content):
+                    parent_pkg = path.parent.name
+                    print(f"    {RED}[CRITICAL] Heuristic Hit inside ALPM metadata for: {parent_pkg}{NC}")
+                    flagged_hooks += 1
+                    break
+        except Exception:
+            continue
+            
+    return flagged_hooks
+
+def scan_build_caches():
+    print(f"{BOLD}[*] Inspecting local AUR build cache directories...{NC}")
+    cache_targets = [
+        Path.home() / ".cache/yay",
+        Path.home() / ".cache/paru",
+        Path("/var/cache/aur")
+    ]
+    
+    flagged_caches = 0
+    compiled_sigs = [re.compile(sig, re.IGNORECASE) for sig in HEURISTIC_SIGS]
+    
+    for cache_dir in cache_targets:
+        if not cache_dir.exists():
+            continue
+        for path in cache_dir.glob("**/PKGBUILD"):
             try:
-                find_cmd = f"find /tmp /var/tmp ~/.config -type f -name '{ioc}' 2>/dev/null"
-                result = subprocess.run(find_cmd, shell=True, capture_output=True, text=True)
-                if result.stdout.strip():
-                    print(f"  {RED}[!] SafeDep IOC FOUND:{NC} eBPF rootkit artifact ({ioc}) detected.")
-                    paranoia_level += 1
+                content = path.read_text(errors="ignore")
+                for sig in compiled_sigs:
+                    if sig.search(content):
+                        print(f"    {RED}[CRITICAL] Suspicious instruction sequence found in: {path}{NC}")
+                        flagged_caches += 1
+                        break
             except Exception:
-                pass
-
-    if paranoia_level == 0:
-        print(f"  {GREEN}[+] ZERO ARTIFACTS FOUND.{NC} The malicious hooks did not execute.")
-        print(f"  {GREEN}[+] Paranoia averted. Safe to surgically remove the package.{NC}")
-        return False
-    else:
-        print(f"\n  {RED}[!!!] SYSTEM COMPROMISE CONFIRMED [!!!]{NC}")
-        print(f"  The hooks executed. Uninstalling the package will NOT clear the rootkit.")
-        print(f"  Rotate all keys and reinstall the OS from clean media.")
-        return True
-
-def get_package_info(pkg):
-    try:
-        result = subprocess.run(['pacman', '-Qi', pkg], capture_output=True, text=True, check=True)
-        desc = "Unknown"
-        req_by = "None"
-        for line in result.stdout.split('\n'):
-            if line.startswith("Description"):
-                desc = line.split(':', 1)[1].strip()
-            elif line.startswith("Required By"):
-                req_by = line.split(':', 1)[1].strip()
-        return desc, req_by
-    except subprocess.CalledProcessError:
-        return "Unknown", "None"
+                continue
+                
+    return flagged_caches
 
 def main():
-    print(f"{RED}[!!!] CRITICAL INCIDENT AUDITOR: ATOMIC ARCH [!!!]{NC}")
+    banner()
     
-    blocklist = fetch_sonatype_packages()
-    safedep_iocs = fetch_safedep_iocs()
-    local_pkgs = get_local_aur_packages()
+    if os.getuid() != 0:
+        print(f"{YELLOW}[!] Running without root privileges. Heuristic depth on /var/lib/pacman may be partial.{NC}\n")
+
+    threat_intel = fetch_live_compromised_list()
     
-    affected = [pkg for pkg in local_pkgs if pkg in blocklist]
-
-    if not affected:
-        print(f"{GREEN}[+] System Clean. No known compromised AUR packages found.{NC}")
-        sys.exit(0)
-
-    print(f"{RED}[!] Found {len(affected)} affected package(s) on your system.{NC}\n")
-
-    for pkg in affected:
-        print(f"{YELLOW}======================================================{NC}")
-        print(f"{CYAN}Target:{NC} {pkg}")
+    print(f"\n{BOLD}[*] Enumerating installed system artifacts...{NC}")
+    local_aur = get_local_aur_packages()
+    
+    cross_match = set(local_aur).intersection(threat_intel)
+    
+    meta_flags = scan_pacman_local_db()
+    cache_flags = scan_build_caches()
+    
+    print(f"\n{BOLD}==================== Summary Report ===================={NC}")
+    if cross_match:
+        print(f"{RED}[CRITICAL] MATCH DETECTED Against Live Threat Feed!{NC}")
+        for matched_pkg in cross_match:
+            print(f"    - {matched_pkg}")
+            
+    if meta_flags > 0 or cache_flags > 0:
+        print(f"{RED}[!] WARNING: Heuristic evaluation flagged structural malicious footprints.{NC}")
         
-        desc, req_by = get_package_info(pkg)
-        print(f"{CYAN}Category:{NC} {desc}")
-        
-        if req_by == "None":
-            print(f"{CYAN}Blast Radius:{NC} Zero. Safe to remove.")
-        else:
-            print(f"{RED}WARNING - BLAST RADIUS:{NC} The following will BREAK if removed:")
-            print(f" -> {req_by}")
-        print(f"{YELLOW}------------------------------------------------------{NC}")
-        
-        is_compromised = scan_iocs(safedep_iocs)
-        print(f"{YELLOW}------------------------------------------------------{NC}")
-        
-        if is_compromised:
-            print(f"{RED}WARNING: Because artifacts were found, pacman -Rns will NOT save you.{NC}")
-        
-        confirm = input(f"Grant permission to execute removal of {pkg}? (y/N): ").strip().lower()
-        if confirm == 'y':
-            subprocess.run(['sudo', 'pacman', '-Rns', pkg])
-            print(f"{CYAN}[+] Neutralized package: {pkg}.{NC}\n")
-        else:
-            print(f"{YELLOW}[-] Bypassed: {pkg}.{NC}\n")
-
-    print(f"{CYAN}[*] Audit run completed.{NC}")
+    if not cross_match and meta_flags == 0 and cache_flags == 0:
+        print(f"{GREEN}[✓] System Clean. No active indicators of the Atomic Arch campaign found.{NC}")
+    else:
+        print(f"\n{YELLOW}[i] Security Action Required:{NC}")
+        print("    1. Freeze software modifications.")
+        print("    2. Audit the flagged files manually via git history/PKGBUILD diff paths.")
+        print("    3. If infected, rotate all active keys, sessions, and credentials immediately.")
+    print(f"{BOLD}========================================================{NC}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}[-] Diagnostic sweep interrupted by user.{NC}")
+        sys.exit(0)
