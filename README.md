@@ -19,3 +19,8 @@ git clone [https://github.com/YOUR_USERNAME/atomic-arch-auditor.git](https://git
 cd atomic-arch-auditor
 chmod +x aur-api-audit.py
 python3 aur-api-audit.py
+```
+
+## Disclaimer
+
+This tool is provided for educational and incident response purposes only. Malware analysis and removal carry inherent risks to system stability. Always back up critical data before executing remediation steps.
