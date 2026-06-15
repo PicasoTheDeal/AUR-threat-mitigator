@@ -16,7 +16,7 @@ Clone the repository and execute the script directly. It requires no environment
 
 ```bash
 git clone https://github.com/PicasoTheDeal/AUR-threat-mitigator.git
-cd atomic-arch-auditor
+cd AUR-threat-mitigator
 chmod +x aur-api-audit.py
 python3 aur-api-audit.py
 ```
