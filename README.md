@@ -48,7 +48,7 @@ A lightweight offline static analysis utility to scan local ALPM metadata and AU
 3. Execute the scan:
 
    ```bash
-   python3 main.py
+   python3 aur-audit.py
    ```
    
 ## Output Targets & Verdicts
