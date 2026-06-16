@@ -1,0 +1,42 @@
+name: AUR Threat Intel Sync & Gatekeeping
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  propose-intel-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch, Sanitize, and Validate Feeds
+        run: |
+          echo "AUR Threat Intel - Staged Verification List" > temp_packages.txt
+          
+          curl -sL "https://md.archlinux.org/s/SxbqukK6IA/download" | grep -oP "^-\s*\K[a-zA-Z0-9\-_+\.]+" >> temp_packages.txt || true
+          
+          curl -sL "https://raw.githubusercontent.com/lenucksi/aur-malware-check/master/package_list.txt" >> temp_packages.txt || true
+
+          grep -E "^[a-z0-9\-_\+\.]+$" temp_packages.txt | sort -u > packages.txt
+          rm temp_packages.txt
+
+      - name: Detect Changes and Generate Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "[Bot] Upstream intelligence delta detected. Pending review."
+          branch: intel-feed-update
+          delete-branch: true
+          title: "Alert: Upstream Threat Intel Update Pending Council Sign-off"
+          body: |
+            ### Automated Threat Intel Syncer
+            An update to the underlying `packages.txt` signature array has been detected from upstream data tracking feeds.
+            
+            **Review Requirements:**
+            Per repository security policy, this PR requires manual cryptographic/identity verification and approval from designated security engineers across our collaborating distributions (**EndeavourOS**, **CachyOS**, and **Arch Linux**) before integration into the master production branch.
+          labels: |
+            security
+            dependencies
