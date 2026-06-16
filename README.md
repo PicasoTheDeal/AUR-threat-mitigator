@@ -39,7 +39,7 @@ A lightweight offline static analysis utility to scan local ALPM metadata and AU
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/PicasoTheDealer/aur-scanner.git
+   git clone https://github.com/PicasoTheDealer/AUR-scanner.git
    cd aur-scanner
    ```
 
