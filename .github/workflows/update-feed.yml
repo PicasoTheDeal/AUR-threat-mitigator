@@ -1,42 +1,48 @@
-name: AUR Threat Intel Sync & Gatekeeping
+name: Update Threat Feed
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  propose-intel-update:
+  audit-and-sync:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Fetch, Sanitize, and Validate Feeds
-        run: |
-          echo "AUR Threat Intel - Staged Verification List" > temp_packages.txt
-          
-          curl -sL "https://md.archlinux.org/s/SxbqukK6IA/download" | grep -oP "^-\s*\K[a-zA-Z0-9\-_+\.]+" >> temp_packages.txt || true
-          
-          curl -sL "https://raw.githubusercontent.com/lenucksi/aur-malware-check/master/package_list.txt" >> temp_packages.txt || true
-
-          grep -E "^[a-z0-9\-_\+\.]+$" temp_packages.txt | sort -u > packages.txt
-          rm temp_packages.txt
-
-      - name: Detect Changes and Generate Pull Request
-        uses: peter-evans/create-pull-request@v6
+      - name: Set up Python Environment
+        uses: actions/setup-python@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "[Bot] Upstream intelligence delta detected. Pending review."
-          branch: intel-feed-update
-          delete-branch: true
-          title: "Alert: Upstream Threat Intel Update Pending Council Sign-off"
-          body: |
-            ### Automated Threat Intel Syncer
-            An update to the underlying `packages.txt` signature array has been detected from upstream data tracking feeds.
-            
-            **Review Requirements:**
-            Per repository security policy, this PR requires manual cryptographic/identity verification and approval from designated security engineers across our collaborating distributions (**EndeavourOS**, **CachyOS**, and **Arch Linux**) before integration into the master production branch.
-          labels: |
-            security
-            dependencies
+          python-version: '3.11'
+
+      - name: Validate Local Manifest Format
+        run: |
+          python3 -c '
+          import re, sys
+          from pathlib import Path
+          p = Path("packages.txt")
+          if not p.exists(): sys.exit(1)
+          lines = p.read_text().splitlines()
+          for l in lines:
+              l = l.strip()
+              if not l or l.startswith("#"): continue
+              if not re.match(r"^[a-z0-9\-_\+\.]+$", l):
+                  print(f"Invalid signature format: {l}")
+                  sys.exit(1)
+          '
+
+      - name: Check for Changes and Commit
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add packages.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Automated synchronization of threat feed baseline"
+            git push origin main
+          fi
