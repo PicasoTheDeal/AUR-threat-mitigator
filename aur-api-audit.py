@@ -11,7 +11,6 @@ YELLOW = "\033[1;33m"
 CYAN = "\033[1;36m"
 MAGENTA = "\033[1;35m"
 BOLD = "\033[1m"
-UNDERLINE = "\033[4m"
 NC = "\033[0m"
 
 MANIFEST_FILE = "packages.txt"
@@ -82,7 +81,7 @@ def analyze_file_content(file_path):
             if re.search(signature, content, re.IGNORECASE):
                 findings.append((signature, description))
     except Exception:
-        pass  
+        pass
     return findings
 
 def deep_scan_all_caches(user_home):
@@ -97,10 +96,12 @@ def deep_scan_all_caches(user_home):
     total_scanned = 0
     total_hits = 0
     cache_compromised = False
+    active_caches = 0
     
     for base in cache_bases:
         if not base.exists():
             continue
+        active_caches += 1
         print(f"    [*] Scanning directory tree root: {base}")
         for pkgbuild_file in base.glob("**/PKGBUILD"):
             total_scanned += 1
@@ -113,7 +114,12 @@ def deep_scan_all_caches(user_home):
                 for sig, desc in structural_anomalies:
                     print(f"        [-] Heuristic Trigger: '{sig}' -> ({desc})")
                     
-    print(f"\n    [COMPLETE] Content scan done. Inspected {total_scanned} scripts. Detected {total_hits} behavior anomalies.")
+    if active_caches == 0:
+        print(f"    {YELLOW}[!] WARNING: No local helper build caches found. Caches may have been cleared via clean commands.{NC}")
+        print(f"        Heuristic discovery is relying strictly on persistent ALPM system metadata structures.{NC}")
+    else:
+        print(f"\n    [COMPLETE] Content scan done. Inspected {total_scanned} scripts. Detected {total_hits} behavior anomalies.")
+        
     return cache_compromised
 
 def audit_target_locations(package, version, user_home):
@@ -123,13 +129,13 @@ def audit_target_locations(package, version, user_home):
     alpm_meta_base = Path(f"/var/lib/pacman/local/{package}-{version}")
     if alpm_meta_base.exists():
         threat_isolated = True
-        print(f"    [*] Metadata Footprint Verified: {alpm_meta_base}")
+        print(f"    [*] Persistent ALPM Metadata Footprint Verified: {alpm_meta_base}")
         for critical_file in ["desc", "install"]:
             target_file = alpm_meta_base / critical_file
             if target_file.exists():
                 structural_anomalies = analyze_file_content(target_file)
                 for sig, desc in structural_anomalies:
-                    print(f"        [BEHAVIORAL HIT] Operational anomaly in install hooks: '{sig}' -> ({desc})")
+                    print(f"        [BEHAVIORAL HIT] Operational anomaly in system install hooks: '{sig}' -> ({desc})")
 
     cache_clusters = [
         user_home / f".cache/yay/{package}",
