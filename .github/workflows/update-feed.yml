@@ -1,42 +1,83 @@
-name: Update Threat Feed
+name: Update Feed
 
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      url:
+        description: 'Paste Threat Feed URL'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  audit-and-sync:
+  update:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python Environment
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Validate or Initialize Local Manifest
+      - name: Fetch and sanitize feed
+        env:
+          INPUT_URL: ${{ github.event.inputs.url }}
         run: |
-          if [ ! -f packages.txt ]; then
-            touch packages.txt
+          cat << 'EOF' > script.py
+          import os
+          import sys
+          import re
+          import urllib.request
+          from urllib.error import URLError, HTTPError
+
+          url = os.environ.get('INPUT_URL', '').strip()
+          if not url:
+              url = 'https://md.archlinux.org/s/SxbqukK6IA/download'
+
+          try:
+              req = urllib.request.Request(
+                  url,
+                  headers={'User-Agent': 'Mozilla/5.0 (compatible; GitHub Action; +https://github.com/your-repo)'}
+              )
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  data = resp.read().decode('utf-8')
+          except (URLError, HTTPError) as e:
+              print(f"Error fetching URL: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          valid_entries = set()
+          pattern = re.compile(r'^[a-z0-9_.+-]+$')
+
+          for line in data.splitlines():
+              line = line.strip()
+              if not line or line.startswith('#'):
+                  continue
+              if pattern.fullmatch(line):
+                  valid_entries.add(line)
+
+          if len(valid_entries) == 0:
+              print("No valid entries found. Aborting to prevent overwriting baseline.", file=sys.stderr)
+              sys.exit(1)
+
+          sorted_entries = sorted(valid_entries)
+          with open('packages.txt', 'w') as f:
+              for entry in sorted_entries:
+                  f.write(entry + '\n')
+
+          print(f"Successfully wrote {len(sorted_entries)} entries to packages.txt")
+          EOF
+          python script.py
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet packages.txt; then
+            echo "No changes to packages.txt"
           else
-            if tr -d '\r' < packages.txt | grep -v '^#' | grep -v '^$' | grep -q -v -E '^[a-z0-9_+.-]+$'; then
-              exit 1
-            fi
-          fi
-
-      - name: Check for Changes and Commit
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add packages.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Automated synchronization of threat feed baseline"
-            git push origin HEAD:main
+            git add packages.txt
+            git commit -m "Update packages.txt from feed"
+            git push origin main
           fi
